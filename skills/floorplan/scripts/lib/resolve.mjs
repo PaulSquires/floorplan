@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readJsonLoose, stripJsonComments, MAX_CONFIG_BYTES } from './common.mjs';
+import { createTikoResolver } from './tiko.mjs';
 
 const P = path.posix;
 
@@ -540,6 +541,8 @@ export function createResolver(root, files) {
     return { unresolved: true };
   };
 
+  const resolveTiko = createTikoResolver(root, files, resolveRelative);
+
   // ---- Shopify themes ----
   const resolveLiquid = (from, imp) => {
     const app = /^shopify:\/\/apps\/([\w-]+)/.exec(imp.spec);
@@ -618,6 +621,7 @@ export function createResolver(root, files) {
       case 'ruby': return resolveRelative(file.path, imp.spec, ['.rb']);
       case 'php': return resolvePhp(file.path, imp, file.repo);
       case 'liquid': return resolveLiquid(file.path, imp);
+      case 'tiko': return resolveTiko(file, imp);
       case 'css': return resolveRelative(file.path, imp.spec, ['.css', '.scss', '.sass', '.less']).file ? resolveRelative(file.path, imp.spec, ['.css', '.scss']) : resolveRelative(file.path, P.join(P.dirname(imp.spec), '_' + P.basename(imp.spec)), ['.scss', '.sass']);
       default: return resolveRelative(file.path, imp.spec, []);
     }

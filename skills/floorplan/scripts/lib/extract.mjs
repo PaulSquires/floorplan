@@ -2,6 +2,7 @@
 // Deliberately approximate: good enough to draw the map, cheap enough to run on any repo.
 import { forwardIndexOf, importStatements, callArgs } from './common.mjs';
 import { dataRoutes } from './route-tables.mjs';
+import { extractTiko } from './tiko.mjs';
 
 import path from 'node:path';
 
@@ -2249,6 +2250,7 @@ function extractByLang(src, lang, filePath) {
 }
 
 export function extract(src, lang, filePath) {
+  if (lang === 'tiko') return extractTiko(src); // its own comments and docs (lib/tiko.mjs)
   const r = extractByLang(src, lang, filePath);
   addDocs(src, lang, r);
   return r;
