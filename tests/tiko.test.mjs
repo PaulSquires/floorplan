@@ -39,6 +39,7 @@ test('tiko: imports, includes, libraries, symbols and docs; comments and strings
     'const MSG = "it\'s #import ""quoted"""',
     'const API = "https://api.stripe.com/v1/charges"',
     'const HOME = "http://localhost:8080/"',
+    'const T1 = "http://a/b" : const T2 = "http://[fe80::1]/" : const T3 = "https://user:pw@db.example.org/"',
     '',
     "'' One order line.",
     'public type OrderLine',
@@ -62,7 +63,7 @@ test('tiko: imports, includes, libraries, symbols and docs; comments and strings
     '    Open',
     'end enum',
   ].join('\n'), 'tiko', 'app/orders/orders.tiko');
-  assert.deepEqual(r.imports.map((i) => `${i.kind} ${i.spec}`), ['module std/strings', 'module ../billing', 'include helpers/money.ti', 'lib sqlite3']);
+  assert.deepEqual(r.imports.map((i) => `${i.kind} ${i.spec}`), ['module std/strings', 'module ../billing', 'include helpers/money.ti', 'lib sqlite3', 'module-self .']);
   assert.equal(r.imports[0].alias, 'txt');
   assert.equal(r.imports[1].reexport, true);
   assert.equal(r.module, 'orders');
@@ -80,6 +81,24 @@ test('tiko: outside a module every name not marked private is visible', () => {
   assert.equal(r.doc, 'small helpers for strings.');
 });
 
+test('tiko toolchain itself: std/ imports link to its pkg/std modules when they are in the mapped folder', () => {
+  const scan = scanOf({
+    'pkg/std/strings/strings.tiko': '#module "strings"\n#import "std/containers"\n',
+    'pkg/std/containers/containers.tiko': '#module "containers"\n',
+  });
+  assert.deepEqual(linksOf(scan), ['pkg/std/strings/strings.tiko -> pkg/std/containers/containers.tiko']);
+});
+
+test('tiko: a module with no main file is reached through the files declaring the names the importer uses', () => {
+  const scan = scanOf({
+    'gui/Button.tiko': '#module "gui"\npublic type CButton\nend type\n',
+    'gui/ListView.tiko': '#module "gui"\npublic type CListView\nend type\n',
+    'gui/Menu.tiko': '#module "gui"\npublic function MakeMenu( ) as long\nend function\n',
+    'app.tiko': '#import "./gui"\ndim b as gui.cbutton\nprint gui.MakeMenu( )\n',
+  });
+  assert.deepEqual(linksOf(scan), ['app.tiko -> gui/Button.tiko', 'app.tiko -> gui/Menu.tiko']);
+});
+
 test('tiko: a licence paragraph at the top is passed over for the one that describes the file', () => {
   const r = extract([
     "'    Copyright (C) 2026 Someone",
@@ -92,7 +111,7 @@ test('tiko: a licence paragraph at the top is passed over for the one that descr
   assert.equal(r.doc, 'the application framework: start-up, the loop and tear-down.');
 });
 
-test('tiko project: module imports link to the module directory, includes to files, toolchain packages are outside', () => {
+test('tiko project: module imports link to the main file of the module, which links to the rest, includes to files, toolchain packages are outside', () => {
   const scan = scanOf({
     'units/tiko.toml': '[package]\nname = "units"\n',
     'units/length/length.tiko': '#module "length"\npublic function Metres( ) as double\nend function\n',
@@ -120,9 +139,9 @@ test('tiko project: module imports link to the module directory, includes to fil
     'app/main.tiko -> app/inc/config.ti',
     'app/main.tiko -> app/report/report.tiko',
     'app/main.tiko -> app/textstats/textstats.tiko',
-    'app/main.tiko -> app/textstats/words.tiko',
     'app/main.tiko -> units/length/length.tiko',
     'app/textstats/textstats.tiko -> app/inc/config.ti',
+    'app/textstats/textstats.tiko -> app/textstats/words.tiko',
   ]);
   assert.deepEqual(scan.externals.map((e) => e.id).sort(), ['lib:user32', 'tiko:AfxNova', 'tiko:std/fs', 'tiko:vendor/sqlite3', 'tiko:wordkit']);
 });

@@ -71,7 +71,7 @@ export function stripTiko(src) {
 }
 
 const KIND = { sub: 'function', function: 'function', type: 'type', union: 'type', class: 'class', interface: 'interface', enum: 'enum' };
-const IGNORED_HOST = /^(localhost|127\.|0\.0\.0\.0|\[::1\]|(www\.)?example\.(com|org|net)$|(www\.)?w3\.org$|schemas\.)/i;
+const IGNORED_HOST = /^(localhost|127\.|0\.0\.0\.0|\[::1\]|schemas\.)|(^|\.)(example\.(com|org|net)|w3\.org)$/i;
 
 /** A comment-only line's text, or null. */
 function commentText(line) {
@@ -135,6 +135,8 @@ export function extractTiko(src) {
     imports.push({ spec: m[1], names: [], kind: 'lib', line: at(m.index) });
   }
   const moduleName = /^[ \t]*#[ \t]*module[ \t]+"([^"\n]+)"/im.exec(code)?.[1];
+  // the files of a module see each other: the resolver links its main file to the others
+  if (moduleName) imports.push({ spec: '.', names: [], kind: 'module-self', line: at(code.search(/^[ \t]*#[ \t]*module\b/im)) });
 
   // Top-level procedures and types. In a module only `public` names reach importers, so only those are
   // listed; elsewhere every name not marked private is visible to whoever includes the file.
@@ -158,8 +160,9 @@ export function extractTiko(src) {
 
   // Web addresses the code uses: the outside hosts it calls
   const hosts = [];
-  for (const m of all(/"(?:https?|wss?):\/\/([^\/"\s:?#]+)/gi)) {
-    if (!IGNORED_HOST.test(m[1])) hosts.push({ host: m[1].toLowerCase(), line: at(m.index) });
+  // (a host name with a dot: "http://a/b" and "http://[fe80::1]/" in tests are not services)
+  for (const m of all(/"(?:https?|wss?):\/\/(?:[^\/"\s@]*@)?([^\/"\s:?#]+)/gi)) {
+    if (/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i.test(m[1]) && !IGNORED_HOST.test(m[1])) hosts.push({ host: m[1].toLowerCase(), line: at(m.index) });
   }
 
   const srcLines = src.split('\n');
@@ -167,8 +170,11 @@ export function extractTiko(src) {
     const d = tikoDoc(commentAbove(srcLines, s.line - 1));
     if (d) s.doc = d;
   }
+  // the names this file uses, for picking the files of an imported module that declare them
+  const mentions = imports.some((i) => i.kind === 'module') ? [...new Set((code.match(/[A-Za-z_]\w*/g) || []).map((w) => w.toLowerCase()))].join(' ') : undefined;
   return {
     imports, symbols, routes: [], mounts: [], calls: [], hosts,
+    ...(mentions ? { mentions } : {}),
     ...(moduleName ? { module: moduleName } : {}),
     doc: headerDoc(headerText(srcLines)),
   };
@@ -218,10 +224,31 @@ export function createTikoResolver(root, files, resolveRelative) {
     if (!inDir.has(d)) inDir.set(d, []);
     inDir.get(d).push(f);
   }
-  const moduleFiles = (dir) => {
+  const allModuleFiles = (dir) => {
     const list = inDir.get(P.normalize(dir).toLowerCase()) || [];
     const mods = list.filter((f) => f.module);
     return (mods.length ? mods : list).map((f) => f.path);
+  };
+  // An import reaches the module through its main file, the one named after the directory
+  // (textstats/textstats.tiko), which links on to the rest (a 'module-self' import). A module with
+  // no main file is reached file by file. (Every importer linking to every file of a 90-file module
+  // drowns the map.)
+  const mainOf = (dir, list) => list.find((p) => P.basename(p).replace(/\.[^.]+$/, '').toLowerCase() === P.basename(P.normalize(dir)).toLowerCase());
+  // With no main file, the files declaring a name the importer uses (tiko names are case-blind).
+  const byPath = new Map(tikoFiles.map((f) => [f.path, f]));
+  const mentionCache = new Map();
+  const mentionsOf = (f) => {
+    if (!mentionCache.has(f.path)) mentionCache.set(f.path, new Set((f.mentions || '').split(' ')));
+    return mentionCache.get(f.path);
+  };
+  const moduleFiles = (dir, importer) => {
+    const list = allModuleFiles(dir);
+    const main = mainOf(dir, list);
+    if (main) return [main];
+    if (!importer || list.length <= 1) return list;
+    const used = mentionsOf(importer);
+    const hit = list.filter((p) => (byPath.get(p)?.symbols || []).some((s) => used.has(s.name.toLowerCase())));
+    return hit.length ? hit : list;
   };
   // packages: every directory with a tiko.toml
   const manifests = new Map();
@@ -239,19 +266,21 @@ export function createTikoResolver(root, files, resolveRelative) {
   const found = (list) => (list.length === 1 ? { file: list[0] } : list.length ? { files: list } : null);
 
   const resolveImport = (file, spec) => {
+    const mod = (dir) => moduleFiles(dir, file);
     const s = spec.replace(/\\/g, '/');
     const first = s.split('/')[0];
-    if (s.startsWith('./') || s.startsWith('../')) return found(moduleFiles(P.join(P.dirname(file.path), s))) || { unresolved: true };
-    if (TOOLCHAIN_PKG.has(first)) return { external: s, eco: 'tiko' };
+    if (s.startsWith('./') || s.startsWith('../')) return found(mod(P.join(P.dirname(file.path), s))) || { unresolved: true };
+    // std, vendor and sys are the toolchain's; mapping the toolchain itself, they're its pkg/ folder
+    if (TOOLCHAIN_PKG.has(first)) return found(mod(P.join(repoRoot(file), 'pkg', s))) || { external: s, eco: 'tiko' };
     const pkg = packageOf(file.path);
     const rest = s.split('/').slice(1).join('/');
-    if (pkg?.name === first) return found(moduleFiles(P.join(pkg.dir, rest))) || { unresolved: true };
+    if (pkg?.name === first) return found(mod(P.join(pkg.dir, rest))) || { unresolved: true };
     if (pkg?.deps.has(first)) {
-      const hit = found(moduleFiles(P.join(pkg.dir, pkg.deps.get(first), rest)));
+      const hit = found(mod(P.join(pkg.dir, pkg.deps.get(first), rest)));
       return hit || { external: first, eco: 'tiko' }; // a dependency outside the mapped folder
     }
     // an -i / TIKO_PATH directory: try the repo's root and the mapped folder's
-    return found(moduleFiles(P.join(repoRoot(file), s))) || found(moduleFiles(s)) || { external: first, eco: 'tiko' };
+    return found(mod(P.join(repoRoot(file), s))) || found(mod(s)) || { external: first, eco: 'tiko' };
   };
 
   const resolveInclude = (file, spec) => {
@@ -275,6 +304,12 @@ export function createTikoResolver(root, files, resolveRelative) {
   return (file, imp) => {
     if (imp.kind === 'lib') return { external: imp.spec, eco: 'lib' };
     if (imp.kind === 'module') return resolveImport(file, imp.spec);
+    if (imp.kind === 'module-self') {
+      const dir = P.dirname(file.path);
+      const list = allModuleFiles(dir);
+      if (mainOf(dir, list) !== file.path) return { builtin: true };
+      return found(list.filter((p) => p !== file.path)) || { builtin: true };
+    }
     return resolveInclude(file, imp.spec);
   };
 }
